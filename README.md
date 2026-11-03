@@ -61,6 +61,7 @@ flowchart LR
 bun install
 
 # 1) 完全退出 TradingView（托盘图标也要退；调试端口只能在启动时开启）
+#    只想跑在服务器上？跳过第 1-2 步，直接看下面「抓取凭据并迁移」
 powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
 
 # 2) 启动网关
@@ -74,6 +75,59 @@ curl -X POST http://127.0.0.1:8787/order \
 
 顺序不能颠倒：`requestSingleInstanceLock` 生效，TV 已在运行时新进程只会把参数转给旧实例，
 端口不会打开。
+
+## 两种运行模式
+
+| 模式 | 需要什么 | 适合 |
+|---|---|---|
+| **attached**（默认） | 本机跑着 TradingView 桌面版 + 调试端口 | 自己电脑上边看图边自动化 |
+| **headless** | 只需一个抓取下来的 `sessionid` | 服务器 / 容器 / 无桌面环境 |
+
+headless 模式不需要浏览器、不需要桌面版、不需要 GUI —— 凭据抓一次，之后长期使用。
+
+## 抓取凭据并迁移
+
+纸交易接口只认一个 cookie：`sessionid`。实测 `sessionid` 单个即可（`sessionid_sign`、
+`device_t` 都不是必需），有效期通常数月。凭据用**密封信封**传输：抓取端只有公钥，只能加密不能解密。
+
+```bash
+# ── 1. 在部署机（要跑 API 的那台）生成密钥对，私钥留在部署机
+bun run src/credctl.ts keygen
+#   { "publicKey": "...", "privateKey": "..." }
+#   私钥 -> TV_CRED_PRIVKEY（只留在部署机）
+#   公钥 -> 拷到有 TradingView 的那台机器
+
+# ── 2. 在有 TradingView 的机器上抓取并加密
+bun run src/credctl.ts capture --to=<publicKey> --out=./cred.enc
+#   -> 写一个 0600 的密文文件，打印 session 到期时间
+
+# ── 3. 只把 cred.enc 传到部署机（明文凭据从不落盘）
+
+# ── 4. 部署机验证：解封 + 真实调用一次
+TV_CRED_PUBKEY=<publicKey> TV_CRED_PRIVKEY=<privateKey> \
+  bun run src/credctl.ts verify --credfile=./cred.enc
+
+# ── 5. 用凭据启动，不需要 TradingView
+TV_CRED_PUBKEY=... TV_CRED_PRIVKEY=... TV_CREDFILE=./cred.enc bun run bridge
+```
+
+也可以不加密，直接用环境变量（适合临时调试）：
+
+```bash
+TV_SESSIONID=<sessionid> bun run bridge
+```
+
+### 环境变量
+
+| 变量 | 说明 |
+|---|---|
+| `TV_SESSIONID` | 直接给 cookie（或裸 `sessionid` 值），跳过加密信封 |
+| `TV_CREDFILE` | 密封凭据文件路径 |
+| `TV_CRED_PUBKEY` / `TV_CRED_PRIVKEY` | 解封所需的密钥对 |
+| `TV_SEGMENT` | `pro`（默认）或 `free` |
+| `TV_ACCOUNT` | 固定使用的账户 id，省掉每次查询 |
+| `BRIDGE_PORT` / `BRIDGE_HOST` / `BRIDGE_TOKEN` | 网关监听与鉴权 |
+| `TVCDP_PORT` | attached 模式的调试端口 |
 
 ## 网关 API
 
@@ -169,38 +223,49 @@ TradingView 没有独立的「做多」「做空」接口，它是**净持仓**�
 ## 目录
 
 ```
-src/page-shim.ts    注入渲染进程执行，复刻 paperFetch（自包含、无运行时依赖）
+src/page-shim.ts    协议核心：注入渲染进程与 headless 调用共用同一份实现
 src/cdp.ts          CDP 客户端：找 chart 页、求值、取回结果
-src/driver.ts       参数校验 + 命令编排
+src/credential.ts   密封信封：X25519 + HKDF + AES-256-GCM
+src/credctl.ts      凭据工具：keygen / capture / verify
+src/driver.ts       参数校验 + 两种传输（attached / headless）
 src/bridge.ts       Bun HTTP 网关 127.0.0.1:8787
 src/tvctl.ts        命令行
 src/types.ts        线上字段类型
 scripts/launch-tv.ps1  带调试端口启动 TradingView（Windows）
-test/               bun test：单元 + 端到端
+test/               bun test：单元 + 凭据 + headless + 端到端
 examples/client.py  Python 对接示例
 ```
 
 ## 测试
 
 ```bash
-bun test          # 单元测试 + 端到端（TV 未开调试端口时自动跳过端到端）
+bun test          # 47 项：单元 + 凭据信封 + headless + 端到端
 bun run typecheck
 ```
 
-端到端测试在渲染进程里替换 `window.fetch` 为记录桩，逐字段断言 URL / host / method /
-`credentials:'include'` / Content-Type / JSON body，**不会真实下单**。
+- **headless 测试**替换全局 `fetch` 为记录桩，断言 URL、方法、Cookie、Origin/Referer、
+  User-Agent，以及“不发多余鉴权头”这一约束 —— 不需要网络。
+- **端到端测试**在渲染进程里替换 `window.fetch`，逐字段断言实际发出的请求；
+  TV 未开调试端口时整组跳过。
+- 两者都**不会真实下单**。
 
 ## 数据与脱敏
 
 本仓库不含任何凭证或真实账户数据：
 
-- **无凭证**：没有 token、cookie、密码、私钥。运行期凭证只存在于 TradingView 自己的 profile 里，
-  本项目从不读取、也从不写入。
+- **仓库里无凭证**：没有 token、cookie、密码、私钥。凭据只在你自己的机器上产生，
+  以密文形式传递，绝不进入仓库（`.gitignore` 已排除 `*.enc`、`.env*`、`cred*`）。
+- **凭据只在内存里解密**：headless 模式启动时解封一次，之后只存在于进程内存，
+  不写日志、不落盘、不回显。`credctl capture` 输出的密文文件权限为 0600。
 - **无账户标识**：文档、示例、测试里的 accountId、订单号、余额、持仓全部是占位值
   （`paper-1`、`42`、`100000` 之类）；真实账号 id、订单 id 在发布前已从文档中清除。
 - **无主机名**：不包含部署路径、内网地址、SSH 目标等环境信息。
-- **可配置而非硬编码**：端口、token、超时全部走环境变量
-  （`BRIDGE_PORT`、`BRIDGE_TOKEN`、`BRIDGE_TIMEOUT_MS`、`TVCDP_PORT`），仓库里没有本地配置。
+- **可配置而非硬编码**：端口、token、超时、凭据路径全部走环境变量
+  （`BRIDGE_PORT`、`BRIDGE_TOKEN`、`BRIDGE_TIMEOUT_MS`、`TVCDP_PORT`、`TV_CREDFILE` …），
+  仓库里没有本地配置。
+
+> 抓取到的 `sessionid` 等价于你 TradingView 账户的登录态。它只能解密给持有对应私钥的部署机，
+> 但**请把它当作密码对待**：不要提交、不要贴在 issue 里、不要放进截图。
 
 如果你要基于本项目出图或写文章，请同样替换掉自己的 accountId 与订单号。
 

@@ -10,6 +10,14 @@ npm-debug.log*
 .env.*
 !.env.example
 
+# credentials: sealed envelopes, key material, raw cookie dumps.
+# Never commit these - they are equivalent to a TradingView password.
+*.enc
+cred.enc
+cred*.json
+keys.json
+*.pem
+
 # OS / editor
 .DS_Store
 Thumbs.db
