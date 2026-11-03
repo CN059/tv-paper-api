@@ -5,21 +5,39 @@
  * TradingView and no network are involved.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PORT = 8891;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 let child: ReturnType<typeof Bun.spawn> | null = null;
+let webRoot = '';
+
+/**
+ * A fixture console rather than the real build: routing is what this file tests,
+ * and depending on `web/dist` would make the suite fail whenever the console has
+ * not been built (as it is in the CI server job, which builds nothing).
+ */
+async function makeFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'tv-web-'));
+  await mkdir(join(root, 'assets'), { recursive: true });
+  await writeFile(join(root, 'index.html'), '<!doctype html><div id="root"></div><script src="/assets/app.js"></script>');
+  await writeFile(join(root, 'assets', 'app.js'), 'console.log("fixture")');
+  return root;
+}
 
 beforeAll(async () => {
+  webRoot = await makeFixture();
   // A malformed cookie is fine: these tests never reach upstream, they check routing.
   // process.execPath is this Bun binary; spawning 'bun' relies on PATH working,
   // which it does not on every Windows shell.
   child = Bun.spawn([process.execPath, 'src/server.ts'], {
     // fileURLToPath, not .pathname: on Windows the latter yields /C:/... which is invalid.
     cwd: fileURLToPath(new URL('..', import.meta.url)),
-    env: { ...process.env, PORT: String(PORT), TV_SESSIONID: 'sessionid=routing-test', WEB_ROOT: './web/dist' },
+    env: { ...process.env, PORT: String(PORT), TV_SESSIONID: 'sessionid=routing-test', WEB_ROOT: webRoot },
     stdout: 'ignore',
     stderr: 'ignore',
   });
@@ -35,8 +53,9 @@ beforeAll(async () => {
   throw new Error('server did not start');
 });
 
-afterAll(() => {
+afterAll(async () => {
   child?.kill();
+  if (webRoot) await rm(webRoot, { recursive: true, force: true });
 });
 
 describe('single-port routing', () => {
