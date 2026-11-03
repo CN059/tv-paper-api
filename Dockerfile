@@ -33,8 +33,9 @@ ENV NODE_ENV=production \
 EXPOSE 8787
 
 # The health endpoint is behind BRIDGE_TOKEN, so the probe must present it.
-# CMD-SHELL form, not exec: the token has to be expanded at runtime.
+# Shell form (CMD without brackets), not exec form: HEALTHCHECK has no CMD-SHELL,
+# and shell form is what makes ${BRIDGE_TOKEN} expand at runtime rather than build.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD-SHELL wget -q -T 3 -O /dev/null --header="Authorization: Bearer ${BRIDGE_TOKEN}" "http://127.0.0.1:${PORT}/api/health" || exit 1
+  CMD wget -q -T 3 -O /dev/null --header="Authorization: Bearer ${BRIDGE_TOKEN}" "http://127.0.0.1:${PORT}/api/health" || exit 1
 
 CMD ["bun", "src/server.ts"]
