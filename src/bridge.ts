@@ -105,8 +105,12 @@ const server = Bun.serve({
       }
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      // Anything the driver phrased as a contract violation is the caller's fault.
-      const status = /required|must be|positive number|JSON object|unknown segment/.test(message) ? 400 : 500;
+      // Contract violations are the caller's fault; an unreachable driver is upstream's.
+      const status = /required|must be|positive number|JSON object|unknown segment/.test(message)
+        ? 400
+        : /no TradingView chart page|timed out|socket error/.test(message)
+          ? 502
+          : 500;
       return json(status, { ok: false, error: message });
     }
   },

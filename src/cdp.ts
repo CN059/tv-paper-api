@@ -21,12 +21,17 @@ export interface CdpOptions {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+/** The debug endpoint is absent whenever TradingView is not running: that is a normal state. */
 async function listTargets(port: number): Promise<Target[]> {
-  const res = await fetch(`http://127.0.0.1:${port}/json/list`, {
-    signal: AbortSignal.timeout(3_000),
-  });
-  const parsed: unknown = await res.json();
-  return Array.isArray(parsed) ? (parsed as Target[]) : [];
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/list`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    const parsed: unknown = await res.json();
+    return Array.isArray(parsed) ? (parsed as Target[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** The chart page we can drive, or `null` when TradingView is not running with a debug port. */
