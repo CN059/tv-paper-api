@@ -86,11 +86,13 @@ describe('envelope text form', () => {
 });
 
 describe('key generation', () => {
-  test('produces 32-byte public keys and PKCS#8 private keys', async () => {
+  test('produces SPKI public keys and PKCS#8 private keys', async () => {
     const pair = await generateKeyPair();
 
-    expect(Buffer.from(pair.publicKey, 'base64')).toHaveLength(32);
-    expect(Buffer.from(pair.privateKey, 'base64').length).toBeGreaterThan(40);
+    // P-256 in DER: 91-byte SPKI public key, 138-byte PKCS#8 private key.
+    // SPKI/PKCS#8 is what .NET reads natively, which is why this curve was chosen.
+    expect(Buffer.from(pair.publicKey, 'base64')).toHaveLength(91);
+    expect(Buffer.from(pair.privateKey, 'base64')).toHaveLength(138);
   });
 
   test('produces distinct pairs', async () => {

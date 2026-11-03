@@ -1,5 +1,8 @@
 # dependencies
 node_modules/
+web/node_modules/
+tools/captor/target/
+target/
 
 # logs
 *.log
@@ -17,6 +20,9 @@ cred.enc
 cred*.json
 keys.json
 *.pem
+
+# build output
+web/dist/
 
 # OS / editor
 .DS_Store

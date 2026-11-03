@@ -1,0 +1,15 @@
+# Keep build context small: the runtime image needs only src/, web/ and manifests.
+node_modules/
+**/node_modules/
+web/dist/
+tools/
+target/
+**/target/
+.git/
+.github/
+*.md
+!README.md
+.venv/
+*.enc
+.env
+.env.*

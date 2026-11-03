@@ -1,9 +1,15 @@
 # tv-paper-api
 
-用外部程序驱动 **TradingView 桌面版**的 Paper Trading（模拟交易）：本地 HTTP 接口 + 命令行，
-买、卖、做多、做空、平仓、反手、限价、撤单全部可用。
+用外部程序驱动 **TradingView 桌面版**的 Paper Trading（模拟交易）。三个入口，同一套接口：
 
-面向量化应用对接：`POST http://127.0.0.1:8787/order` 就完成一次模拟下单。
+| 入口 | 适合 |
+|---|---|
+| **Web 控制台** `http://127.0.0.1:8787/` | 手动下单、看持仓、撤单，不用敲命令 |
+| **HTTP API** `POST /api/order` | 量化程序对接 |
+| **命令行** `bun run cli` | 脚本与管道 |
+
+外加一个**凭据抓取工具**（Rust 单文件，Windows/macOS/Linux 通用）：点几下按钮就能
+生成可迁移的加密凭据，之后服务器上不需要浏览器也不需要 TradingView。
 
 > 非官方接口。路径与字段是从桌面客户端逆向得到的，TradingView 不做任何兼容承诺。
 
@@ -48,7 +54,7 @@ new URL(`${TRADING_URLS[segment]}/${path}`, location.origin)
 
 ```mermaid
 flowchart LR
-  Q["量化应用<br/>Python / Bun"] -->|"HTTP 127.0.0.1:8787"| B["bridge<br/>本地网关"]
+  Q["量化应用<br/>Python / Bun"] -->|"HTTP /api/*"| B["server<br/>同一端口也能打开控制台"]
   B -->|"CDP Runtime.evaluate"| P["TV 渲染进程<br/>/chart"]
   P -->|"fetch + sessionid<br/>UA: TVDesktop"| S["papertrading.tradingview.com<br/>/trading/*"]
 ```
@@ -61,33 +67,54 @@ flowchart LR
 git clone https://github.com/CN059/tv-paper-api
 cd tv-paper-api
 bun install
+bun run build:web      # 构建控制台（首次或前端改动后）
 ```
 
-## 先选运行模式
+## 启动
+
+一个进程、一个端口，控制台和 API 都在上面：
+
+```bash
+bun run start
+```
+
+```text
+tv-paper-api on http://127.0.0.1:8787  (mode headless, token off)
+```
+
+打开 http://127.0.0.1:8787/ 就是控制台。
+
+### 两种运行模式
 
 | 模式 | 需要什么 | 适合 |
 |---|---|---|
 | **attached**（默认） | 本机跑着 TradingView 桌面版，且带调试端口启动 | 自己电脑上边看图边自动化 |
-| **headless** | 只需要一个抓取下来的 `sessionid` | 服务器 / 容器 / 无桌面环境 |
+| **headless** | 只需要一个抓取下来的凭据 | 服务器 / 容器 / 无桌面环境 |
 
-**只想在服务器上跑量化** → 直接看下一节「从零获取凭据」，然后跳到「网关 API」。
-**只想在自己电脑上用** → 走下面这条，不需要处理任何凭据：
+attached 方式：
 
 ```bash
-# 1) 完全退出 TradingView（托盘图标也要退）
-#    调试端口只能在启动时开启，已运行的实例不会接受
+# 完全退出 TradingView（托盘图标也要退），再带调试端口启动
 powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
-
-# 2) 启动网关
-bun run bridge
-
-# 3) 下单
-curl -X POST http://127.0.0.1:8787/order \
-  -H "Content-Type: application/json" \
-  -d '{"symbol":"NASDAQ:AAPL","side":"buy","qty":1}'
+bun run start            # 不设任何凭据即为 attached
 ```
 
-`requestSingleInstanceLock` 生效：TV 已在运行时，新进程只会把参数转给旧实例，端口不会打开。
+headless 方式见下一节。`requestSingleInstanceLock` 生效：TV 已在运行时，新进程只会把参数
+转给旧实例，端口不会打开。
+
+### 环境变量
+
+| 变量 | 说明 |
+|---|---|
+| `PORT` / `HOST` | 监听地址，默认 `127.0.0.1:8787` |
+| `BRIDGE_TOKEN` | 要求 `Authorization: Bearer <token>`（控制台会提示输入） |
+| `TV_SESSIONID` | 直接给 cookie（或裸 `sessionid` 值），跳过加密信封 |
+| `TV_CREDFILE` | 密封凭据文件路径 |
+| `TV_CRED_PUBKEY` / `TV_CRED_PRIVKEY` | 解封所需的密钥对 |
+| `TV_SEGMENT` | `pro`（默认）或 `free` |
+| `TV_ACCOUNT` | 固定使用的账户 id，省掉每次查询 |
+| `TVCDP_PORT` | attached 模式的调试端口 |
+| `WEB_ROOT` | 控制台静态文件目录，默认 `web/dist` |
 
 ## 从零获取凭据
 
@@ -125,39 +152,54 @@ bun run credctl keygen
 
 ### 2. 在 A 上抓取并加密
 
-A 上的 TradingView 要**已经登录**，并且**带着调试端口在跑**（否则读不到 cookie）：
+下载 `tv-paper-captor`（Release 页面有 Windows / macOS / Linux 单文件，无需安装），
+或者从源码构建：
 
 ```bash
-# A 上也装一份这个项目
-git clone https://github.com/CN059/tv-paper-api && cd tv-paper-api && bun install
-
-# 退出 TV 后带端口重启（Windows）
-powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
-
-# 抓取并加密
-bun run credctl capture --to=<公钥> --out=./cred.enc
+cd tools/captor && cargo build --release
+# 产物：target/release/tv-paper-captor(.exe)，约 5 MB
 ```
+
+前置条件：A 上的 TradingView **已登录**，并且**带着调试端口在跑**：
+
+```bash
+# 完全退出 TV，然后
+powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
+```
+
+双击运行 `tv-paper-captor`，窗口里三步：
+
+1. **Session** → 点 `Capture session`。成功会显示还剩多少天。
+2. **Server public key** → 粘贴第 1 步生成的 `publicKey`。合法时会显示指纹前缀。
+3. **Options** → 可选填账户 id / 备注，或勾选 Free 套餐。
+
+然后点 `Seal credential`，得到 `tvcred1.…` 串：可以复制，也可以存成文件。
 
 ```text
-sealed credential written to ./cred.enc (mode 600)
-session expires: 2027-01-31T12:09:57.411Z
-envelope: tvcred1.eyJ2IjoxLCJlcGsiOi...   # 复制这串也能用
+Sealed. Send the server this file, not your cookie.
 ```
 
-三个产物，用途不同：
+窗口长这样：
 
-| 产物 | 用途 |
-|---|---|
-| `cred.enc` | 密文文件，**这个才需要传到 B** |
-| `session expires` | 到期时间，记下来以便提前重抓 |
-| `envelope: tvcred1.…` | 同一份密文的文本形式，方便直接粘贴 |
+```
+┌──────────────────────────────────────────────┐
+│ 1. Session       Debug port [9333] [Capture] │
+│                  Signed in - 88 days left    │
+│ 2. Server public key                         │
+│    [ paste publicKey ]                       │
+│    Valid P-256 key - fingerprint 1a2b3c4d    │
+│ 3. Options  Account [   ] Label [   ]        │
+│             [ ] Free plan                    │
+│ [ Seal credential ]                          │
+└──────────────────────────────────────────────┘
+```
 
-`cred.enc` 权限是 `0600`。明文 cookie 从不落盘、不回显。
-
-可以顺带固定账户，省掉每次查询：
+也可以在无窗口模式下跑（用于脚本或 CI）：
 
 ```bash
-bun run credctl capture --to=<公钥> --account=<accountId> --out=./cred.enc
+tv-paper-captor --to=<publicKey> --out=./cred.enc --account=10000001
+# sealed credential written to ./cred.enc
+# session: 88 days left
 ```
 
 ### 3. 把密文传到 B
@@ -202,7 +244,7 @@ bun run bridge
 ```
 
 ```text
-tv-paper-api bridge on http://127.0.0.1:8787  (mode headless, token off)
+tv-paper-api on http://127.0.0.1:8787  (mode headless, token off)
 ```
 
 看到 `mode headless` 就对了 —— 这台机器上没有浏览器也没有 TradingView。
@@ -223,39 +265,27 @@ bun run bridge
 bun run credctl capture --to=<公钥> --out=./cred.enc   # 然后解开看 cookie
 ```
 
-### 环境变量
-
-| 变量 | 说明 |
-|---|---|
-| `TV_SESSIONID` | 直接给 cookie（或裸 `sessionid` 值），跳过加密信封 |
-| `TV_CREDFILE` | 密封凭据文件路径 |
-| `TV_CRED_PUBKEY` / `TV_CRED_PRIVKEY` | 解封所需的密钥对 |
-| `TV_SEGMENT` | `pro`（默认）或 `free` |
-| `TV_ACCOUNT` | 固定使用的账户 id，省掉每次查询 |
-| `BRIDGE_PORT` / `BRIDGE_HOST` / `BRIDGE_TOKEN` | 网关监听与鉴权 |
-| `TVCDP_PORT` | attached 模式的调试端口 |
-
 ## 网关 API
 
 网关默认 `http://127.0.0.1:8787`，只监听本机。返回统一为 `{ ok, ... }`。
 
 | 方法 | 路径 | body | 说明 |
 |---|---|---|---|
-| GET | `/health` | – | 运行模式与后端状态 |
-| GET | `/accounts` | – | 账户列表（含余额） |
-| GET | `/positions?account=` | – | 持仓 + 挂单 |
-| POST | `/order` | `{symbol, side, qty, type?, price?, sl?, tp?, account?}` | 下单 |
-| POST | `/close` | `{symbol, qty?, account?}` | 平仓 |
-| POST | `/reverse` | `{symbol, account?}` | 多空翻转 |
-| POST | `/cancel` | `{id, account?}` | 撤单 |
+| GET | `/api/health` | – | 运行模式与后端状态 |
+| GET | `/api/accounts` | – | 账户列表（含余额） |
+| GET | `/api/positions?account=` | – | 持仓 + 挂单 |
+| POST | `/api/order` | `{symbol, side, qty, type?, price?, sl?, tp?, account?}` | 下单 |
+| POST | `/api/close` | `{symbol, qty?, account?}` | 平仓 |
+| POST | `/api/reverse` | `{symbol, account?}` | 多空翻转 |
+| POST | `/api/cancel` | `{id, account?}` | 撤单 |
 
 **状态码**：`200` 成功 · `400` 参数不合法 · `401` 网关 token 错误 ·
 `502` 上游拒单或后端不可用 · `500` 其他。
 
-### GET /health
+### GET  /api/health
 
 ```bash
-curl -s http://127.0.0.1:8787/health
+curl -s http://127.0.0.1:8787/api/health
 ```
 
 ```json
@@ -266,10 +296,10 @@ curl -s http://127.0.0.1:8787/health
 { "ok": true, "mode": "attached", "tvTarget": "https://www.tradingview.com/chart/", "cdpPort": 9333 }
 ```
 
-### GET /accounts
+### GET  /api/accounts
 
 ```bash
-curl -s http://127.0.0.1:8787/accounts
+curl -s http://127.0.0.1:8787/api/accounts
 ```
 
 ```json
@@ -296,10 +326,10 @@ curl -s http://127.0.0.1:8787/accounts
 
 不传 `account` 时，后续下单会自动选 `default: true` 且未隐藏的那个。
 
-### GET /positions
+### GET  /api/positions
 
 ```bash
-curl -s "http://127.0.0.1:8787/positions"
+curl -s "http://127.0.0.1:8787/api/positions"
 ```
 
 ```json
@@ -319,10 +349,10 @@ curl -s "http://127.0.0.1:8787/positions"
 `qty` 带符号：**正数是多头，负数是空头**。持仓与挂单对象同样原样转发，
 所以会出现 `close-date`、`marginRate`、`pointvalue` 这类带连字符的原始字段名。
 
-### POST /order
+### POST  /api/order
 
 ```bash
-curl -X POST http://127.0.0.1:8787/order \
+curl -X POST http://127.0.0.1:8787/api/order \
   -H "Content-Type: application/json" \
   -d '{"symbol":"NASDAQ:AAPL","side":"buy","qty":1}'
 ```
@@ -350,38 +380,38 @@ curl -X POST http://127.0.0.1:8787/order \
 
 ```bash
 # 限价单 + 止损止盈
-curl -X POST http://127.0.0.1:8787/order -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8787/api/order -H "Content-Type: application/json" \
   -d '{"symbol":"BINANCE:BTCUSDT","side":"sell","qty":0.01,"type":"limit","price":60000,"sl":61000,"tp":58000}'
 ```
 
 > **市价单是异步的**。返回的 `status` 通常是 `pending`，1–5 秒后才成交。
 > 量化侧必须轮询 `/positions` 确认，不要假定返回即持仓到位。
 
-### POST /close
+### POST  /api/close
 
 ```bash
 # 全部平掉
-curl -X POST http://127.0.0.1:8787/close -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8787/api/close -H "Content-Type: application/json" \
   -d '{"symbol":"NASDAQ:AAPL"}'
 
 # 平掉指定数量
-curl -X POST http://127.0.0.1:8787/close -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8787/api/close -H "Content-Type: application/json" \
   -d '{"symbol":"NASDAQ:AAPL","qty":1}'
 ```
 
-### POST /reverse
+### POST  /api/reverse
 
 ```bash
-curl -X POST http://127.0.0.1:8787/reverse -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8787/api/reverse -H "Content-Type: application/json" \
   -d '{"symbol":"NASDAQ:AAPL"}'
 ```
 
 一次调用把多头翻成等量空头，反之亦然。
 
-### POST /cancel
+### POST  /api/cancel
 
 ```bash
-curl -X POST http://127.0.0.1:8787/cancel -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8787/api/cancel -H "Content-Type: application/json" \
   -d '{"id":42}'
 ```
 
@@ -474,6 +504,79 @@ def wait_filled(symbol, qty, timeout=10):
     return False
 ```
 
+## Web 控制台
+
+同一个端口上的网页，用来看和改：
+
+- **Order** — 选 `buy`/`sell`、填数量、切 `market`/`limit`/`stop`，可带止损止盈
+- **Positions** — 实时持仓，带 `Reverse`（反手）和 `Close`（平仓）
+- **Open orders** — 挂单列表，一行一个 `Cancel`
+
+右上角显示当前模式（`headless` / `attached`）和账户余额；多个账户时可下拉切换。
+如果服务端设了 `BRIDGE_TOKEN`，页面会先要求输入一次，存在浏览器 localStorage。
+
+开发时前后端分离（前端热更新，`/api` 代理到 8787）：
+
+```bash
+bun run start          # 终端 1
+bun run dev:web        # 终端 2 -> http://localhost:5173
+```
+
+生产构建：
+
+```bash
+bun run build:web      # 输出 web/dist，server 会自动伺服
+```
+
+技术栈：React 19 + TypeScript + Vite + Tailwind v4 + shadcn/ui（组件源码在
+`web/src/components/ui`，不是黑盒依赖）。
+
+## Docker
+
+镜像发布在 GHCR，控制台已打包进镜像，一个端口搞定：
+
+```bash
+docker run --rm -p 8787:8787 \
+  -e TV_CREDFILE=/cred/cred.enc \
+  -e TV_CRED_PUBKEY=... -e TV_CRED_PRIVKEY=... \
+  -v "$PWD/cred.enc:/cred/cred.enc:ro" \
+  ghcr.io/cn059/tv-paper-api:latest
+```
+
+```bash
+# 或只给 cookie（不要写进镜像、不要提交）
+docker run --rm -p 8787:8787 -e TV_SESSIONID=... ghcr.io/cn059/tv-paper-api:latest
+```
+
+镜像以非 root 用户运行，带 `/api/health` 健康检查。默认 `HOST=0.0.0.0`（容器内），
+对外暴露时**务必**同时设置 `BRIDGE_TOKEN`——这个端口能下单。
+
+自己构建：
+
+```bash
+docker build -t tv-paper-api .
+```
+
+## CI 与发布
+
+`.github/workflows/ci.yml` 做四件事：
+
+| Job | 触发 | 内容 |
+|---|---|---|
+| `server` | push / PR | `bun run typecheck` + `bun test` |
+| `web` | push / PR | 构建控制台 |
+| `captor` | push / PR | 三平台矩阵编译 Rust 工具并跑 `cargo test` |
+| `image` | push 到 main | 多阶段构建并推送到 `ghcr.io/<owner>/<repo>`（PR 只构建不推送） |
+| `release` | 打 `v*` tag | 把三平台二进制挂到 Release |
+
+镜像标签：分支名、`latest`（仅默认分支）、`sha-<short>`，以及打 tag 时的 `1.2.3` / `1.2`。
+
+发布一个版本：
+
+```bash
+git tag v0.3.0 && git push origin v0.3.0
+```
+
 ## 命令行
 
 ```bash
@@ -564,31 +667,41 @@ TradingView 没有独立的「做多」「做空」接口，它是**净持仓**�
 ## 目录
 
 ```
-src/page-shim.ts    协议核心：注入渲染进程与 headless 调用共用同一份实现
-src/cdp.ts          CDP 客户端：找 chart 页、求值、取回结果
-src/credential.ts   密封信封：X25519 + HKDF + AES-256-GCM
-src/credctl.ts      凭据工具：keygen / capture / verify
-src/driver.ts       参数校验 + 两种传输（attached / headless）
-src/bridge.ts       Bun HTTP 网关 127.0.0.1:8787
-src/tvctl.ts        命令行
-src/types.ts        线上字段类型
+src/
+  server.ts        单端口服务：/api/* + 控制台静态文件
+  page-shim.ts     协议核心：注入渲染进程与 headless 共用同一份实现
+  driver.ts        参数校验 + 两种传输（attached / headless）
+  credential.ts    密封信封：P-256 ECDH + HKDF + AES-256-GCM
+  credctl.ts       凭据工具：keygen / capture / verify
+  cdp.ts           CDP 客户端（attached 模式）
+  cli.ts           命令行
+  types.ts         线上字段类型
+web/               React + TS + shadcn/ui 控制台
+tools/captor/      Rust 跨平台凭据抓取工具（eframe GUI + 无窗口模式）
 scripts/launch-tv.ps1  带调试端口启动 TradingView（Windows）
-test/               bun test：单元 + 凭据 + headless + 端到端
-examples/client.py  Python 对接示例
+test/              bun test
+examples/client.py Python 对接示例
 ```
 
 ## 测试
 
 ```bash
-bun test          # 47 项：单元 + 凭据信封 + headless + 端到端
-bun run typecheck
+bun test           # 54 项
+bun run typecheck  # 服务端 + 控制台
+cd tools/captor && cargo test   # 12 项
 ```
 
-- **headless 测试**替换全局 `fetch` 为记录桩，断言 URL、方法、Cookie、Origin/Referer、
-  User-Agent，以及“不发多余鉴权头”这一约束 —— 不需要网络。
-- **端到端测试**在渲染进程里替换 `window.fetch`，逐字段断言实际发出的请求；
-  TV 未开调试端口时整组跳过。
-- 两者都**不会真实下单**。
+| 文件 | 覆盖 |
+|---|---|
+| `test/unit.test.ts` | 参数校验、shim 自包含性 |
+| `test/credential.test.ts` | 密封/解密、篡改与错误密钥必须失败 |
+| `test/headless.test.ts` | 无浏览器路径的请求头与账户解析 |
+| `test/e2e.test.ts` | 真实渲染进程里的线格式（TV 未开调试端口时跳过） |
+| `test/server.test.ts` | 单端口路由、SPA fallback、路径穿越 |
+| `tools/captor/src/*` | 信封格式、CDP 抓取、GUI 状态 |
+
+两个实现（TypeScript 与 Rust）用 `tools/captor/examples/{seal,open}.rs` 互验：
+Rust 封的能被 Bun 打开，反之亦然。
 
 ## 数据与脱敏
 
@@ -607,6 +720,18 @@ bun run typecheck
 
 > 抓取到的 `sessionid` 等价于你 TradingView 账户的登录态。它只能解密给持有对应私钥的部署机，
 > 但**请把它当作密码对待**：不要提交、不要贴在 issue 里、不要放进截图。
+
+### 密钥轮换
+
+凭据用 P-256 密封。换一对密钥，旧密文就解不开了，必须重新抓取：
+
+```bash
+bun run credctl keygen          # 新的一对
+# 用新的 publicKey 重新 capture，然后更新部署机的 TV_CRED_PUBKEY / TV_CRED_PRIVKEY
+```
+
+`sessionid` 有有效期（控制台和 `capture` 都会显示剩余天数）。过期或改密码后
+`verify` 会返回 `ok: false`，重新 capture 即可。
 
 如果你要基于本项目出图或写文章，请同样替换掉自己的 accountId 与订单号。
 

@@ -7,12 +7,17 @@
  * so it can encrypt but never decrypt, and nothing in transit or at rest is
  * readable without the private key.
  *
- * Construction (WebCrypto only, no dependencies):
- *   X25519 ECDH -> HKDF-SHA256 (fixed salt, domain-separated info) -> AES-256-GCM
+ * Construction (all WebCrypto, no dependencies):
+ *   ECDH P-256 -> HKDF-SHA256 -> AES-256-GCM
+ *
+ * P-256 rather than X25519 on purpose: the Windows capture tool is built on .NET,
+ * whose BCL has no X25519 but does support P-256 natively. One curve both sides
+ * implement means one envelope format and no extra dependency to audit.
  *
  * The envelope carries the consumer's public-key fingerprint so a wrong key fails
  * with a clear message instead of an opaque GCM authentication error.
  */
+const CURVE = 'P-256';
 const AES_ALG = 'AES-GCM';
 const IV_BYTES = 12;
 const TAG_BITS = 128;
@@ -34,21 +39,21 @@ export interface Credential {
 }
 
 export interface KeyPair {
-  /** base64, 32 bytes. Safe to publish: the capture tool needs it. */
+  /** base64 SPKI, 91 bytes for P-256. Safe to publish: the capture tool needs it. */
   publicKey: string;
-  /** base64 PKCS#8. Stays on the consuming host. */
+  /** base64 PKCS#8, 138 bytes. Stays on the consuming host. */
   privateKey: string;
 }
 
 export interface Envelope {
   v: 1;
-  /** base64 X25519 public key of the capturing side (ephemeral). */
+  /** base64 SPKI public key of the capturing side (ephemeral). */
   epk: string;
   /** base64 AES-GCM nonce. */
   nonce: string;
   /** base64 ciphertext with the GCM tag appended. */
   ct: string;
-  /** base64 SHA-256 of the consumer's public key. */
+  /** base64 SHA-256 of the consumer's SPKI public key. */
   rpk: string;
 }
 
@@ -58,27 +63,24 @@ const fromBase64 = (text: string): Uint8Array<ArrayBuffer> => {
   return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
 };
 
+/** P-256 key material crosses the wire in SPKI/PKCS#8, which .NET reads natively. */
 const importPublicKey = (base64: string): Promise<CryptoKey> =>
-  crypto.subtle.importKey('raw', fromBase64(base64), { name: 'X25519' } as EcKeyImportParams, true, []);
+  crypto.subtle.importKey('spki', fromBase64(base64), { name: 'ECDH', namedCurve: CURVE }, true, []);
 
 const importPrivateKey = (base64: string): Promise<CryptoKey> =>
-  crypto.subtle.importKey(
-    'pkcs8',
-    fromBase64(base64),
-    { name: 'X25519' } as EcKeyImportParams,
-    true,
-    ['deriveBits'],
-  );
+  crypto.subtle.importKey('pkcs8', fromBase64(base64), { name: 'ECDH', namedCurve: CURVE }, true, [
+    'deriveBits',
+  ]);
 
-/** NIST-style fingerprint of a public key: SHA-256 over its raw bytes. */
+/** NIST-style fingerprint of a public key: SHA-256 over its DER (SPKI) bytes. */
 async function fingerprint(publicKey: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey('raw', publicKey);
-  return toBase64(new Uint8Array(await crypto.subtle.digest('SHA-256', raw)));
+  const der = await crypto.subtle.exportKey('spki', publicKey);
+  return toBase64(new Uint8Array(await crypto.subtle.digest('SHA-256', der)));
 }
 
 async function deriveAesKey(privateKey: CryptoKey, peer: CryptoKey): Promise<CryptoKey> {
   const shared = await crypto.subtle.deriveBits(
-    { name: 'X25519', public: peer } as EcdhKeyDeriveParams,
+    { name: 'ECDH', public: peer } as EcdhKeyDeriveParams,
     privateKey,
     KEY_BITS,
   );
@@ -94,12 +96,12 @@ async function deriveAesKey(privateKey: CryptoKey, peer: CryptoKey): Promise<Cry
 
 /** Generate the pair the consuming host keeps. Publish only `publicKey`. */
 export async function generateKeyPair(): Promise<KeyPair> {
-  const pair = (await crypto.subtle.generateKey({ name: 'X25519' } as EcKeyGenParams, true, [
+  const pair = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: CURVE }, true, [
     'deriveBits',
   ])) as CryptoKeyPair;
 
   return {
-    publicKey: toBase64(new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))),
+    publicKey: toBase64(new Uint8Array(await crypto.subtle.exportKey('spki', pair.publicKey))),
     privateKey: toBase64(new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey))),
   };
 }
@@ -107,7 +109,7 @@ export async function generateKeyPair(): Promise<KeyPair> {
 /** Encrypt a credential so only the holder of `consumerPublicKey` can read it. */
 export async function seal(credential: Credential, consumerPublicKey: string): Promise<Envelope> {
   const recipient = await importPublicKey(consumerPublicKey);
-  const sender = (await crypto.subtle.generateKey({ name: 'X25519' } as EcKeyGenParams, true, [
+  const sender = (await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: CURVE }, true, [
     'deriveBits',
   ])) as CryptoKeyPair;
 
@@ -121,7 +123,7 @@ export async function seal(credential: Credential, consumerPublicKey: string): P
 
   return {
     v: 1,
-    epk: toBase64(new Uint8Array(await crypto.subtle.exportKey('raw', sender.publicKey))),
+    epk: toBase64(new Uint8Array(await crypto.subtle.exportKey('spki', sender.publicKey))),
     nonce: toBase64(nonce),
     ct: toBase64(new Uint8Array(ciphertext)),
     rpk: await fingerprint(recipient),

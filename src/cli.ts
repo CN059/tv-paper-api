@@ -2,12 +2,12 @@
 /**
  * Command line for the paper-trading endpoints.
  *
- *   bun run src/tvctl.ts accounts
- *   bun run src/tvctl.ts positions [--account=<id>]
- *   bun run src/tvctl.ts place --symbol=NASDAQ:AAPL --side=buy --qty=1 [--type=limit --price=100]
- *   bun run src/tvctl.ts close   --symbol=NASDAQ:AAPL [--qty=1]
- *   bun run src/tvctl.ts reverse --symbol=NASDAQ:AAPL
- *   bun run src/tvctl.ts cancel  --id=<orderId>
+ *   bun run cli accounts
+ *   bun run cli positions [--account=<id>]
+ *   bun run cli place --symbol=NASDAQ:AAPL --side=buy --qty=1 [--type=limit --price=100]
+ *   bun run cli close   --symbol=NASDAQ:AAPL [--qty=1]
+ *   bun run cli reverse --symbol=NASDAQ:AAPL
+ *   bun run cli cancel  --id=<orderId>
  *
  * Transport is picked from the environment:
  *   attached (default)  drives a running desktop app over CDP; --port / TVCDP_PORT

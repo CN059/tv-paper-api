@@ -1,18 +1,21 @@
 {
   "name": "tv-paper-api",
-  "version": "0.2.0",
-  "description": "Drive TradingView Desktop paper trading from outside the app: local HTTP bridge + CLI over the Chrome DevTools Protocol.",
+  "version": "0.3.0",
+  "description": "TradingView paper trading over a local API and web console, with portable sealed credentials.",
   "type": "module",
-  "module": "src/bridge.ts",
+  "module": "src/server.ts",
   "bin": {
-    "tv-paper": "./src/tvctl.ts"
+    "tv-paper": "./src/cli.ts"
   },
   "scripts": {
-    "bridge": "bun run src/bridge.ts",
-    "tvctl": "bun run src/tvctl.ts",
+    "start": "bun run src/server.ts",
+    "dev": "bun run src/server.ts",
+    "cli": "bun run src/cli.ts",
     "credctl": "bun run src/credctl.ts",
+    "build:web": "cd web && bun install --frozen-lockfile && bun run build",
+    "dev:web": "cd web && bun run dev",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
   },
   "engines": {
     "bun": ">=1.3.0"
