@@ -53,19 +53,33 @@ flowchart LR
   P -->|"fetch + sessionid<br/>UA: TVDesktop"| S["papertrading.tradingview.com<br/>/trading/*"]
 ```
 
-## 快速开始
+## 安装
 
 需要 Bun ≥ 1.3。
 
 ```bash
+git clone https://github.com/CN059/tv-paper-api
+cd tv-paper-api
 bun install
+```
 
-# 1) 完全退出 TradingView（托盘图标也要退；调试端口只能在启动时开启）
-#    只想跑在服务器上？跳过第 1-2 步，直接看下面「抓取凭据并迁移」
+## 先选运行模式
+
+| 模式 | 需要什么 | 适合 |
+|---|---|---|
+| **attached**（默认） | 本机跑着 TradingView 桌面版，且带调试端口启动 | 自己电脑上边看图边自动化 |
+| **headless** | 只需要一个抓取下来的 `sessionid` | 服务器 / 容器 / 无桌面环境 |
+
+**只想在服务器上跑量化** → 直接看下一节「从零获取凭据」，然后跳到「网关 API」。
+**只想在自己电脑上用** → 走下面这条，不需要处理任何凭据：
+
+```bash
+# 1) 完全退出 TradingView（托盘图标也要退）
+#    调试端口只能在启动时开启，已运行的实例不会接受
 powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
 
 # 2) 启动网关
-bun run bridge            # 或 BRIDGE_TOKEN=xxx bun run bridge
+bun run bridge
 
 # 3) 下单
 curl -X POST http://127.0.0.1:8787/order \
@@ -73,48 +87,140 @@ curl -X POST http://127.0.0.1:8787/order \
   -d '{"symbol":"NASDAQ:AAPL","side":"buy","qty":1}'
 ```
 
-顺序不能颠倒：`requestSingleInstanceLock` 生效，TV 已在运行时新进程只会把参数转给旧实例，
-端口不会打开。
+`requestSingleInstanceLock` 生效：TV 已在运行时，新进程只会把参数转给旧实例，端口不会打开。
 
-## 两种运行模式
+## 从零获取凭据
 
-| 模式 | 需要什么 | 适合 |
+目标：让一台**没有浏览器、没有桌面版**的机器能调用纸交易接口。
+
+原理：接口只认一个 cookie `sessionid`（实测单个即可，`sessionid_sign`、`device_t` 都不是必需，
+通常数月有效）。把这个 cookie 加密后搬过去即可。
+
+涉及两个角色：
+
+| 角色 | 是什么 | 持有什么 |
 |---|---|---|
-| **attached**（默认） | 本机跑着 TradingView 桌面版 + 调试端口 | 自己电脑上边看图边自动化 |
-| **headless** | 只需一个抓取下来的 `sessionid` | 服务器 / 容器 / 无桌面环境 |
+| **A：有 TradingView 的机器** | 你日常看盘的那台 | 公钥（可公开） |
+| **B：部署机** | 要跑 API 的服务器 | 私钥（绝不外传） |
 
-headless 模式不需要浏览器、不需要桌面版、不需要 GUI —— 凭据抓一次，之后长期使用。
+用非对称加密：**A 只能加密，B 才能解密**。所以密文经过 A、传输链路、磁盘都不怕。
 
-## 抓取凭据并迁移
-
-纸交易接口只认一个 cookie：`sessionid`。实测 `sessionid` 单个即可（`sessionid_sign`、
-`device_t` 都不是必需），有效期通常数月。凭据用**密封信封**传输：抓取端只有公钥，只能加密不能解密。
+### 1. 在 B 上生成密钥对
 
 ```bash
-# ── 1. 在部署机（要跑 API 的那台）生成密钥对，私钥留在部署机
-bun run src/credctl.ts keygen
-#   { "publicKey": "...", "privateKey": "..." }
-#   私钥 -> TV_CRED_PRIVKEY（只留在部署机）
-#   公钥 -> 拷到有 TradingView 的那台机器
-
-# ── 2. 在有 TradingView 的机器上抓取并加密
-bun run src/credctl.ts capture --to=<publicKey> --out=./cred.enc
-#   -> 写一个 0600 的密文文件，打印 session 到期时间
-
-# ── 3. 只把 cred.enc 传到部署机（明文凭据从不落盘）
-
-# ── 4. 部署机验证：解封 + 真实调用一次
-TV_CRED_PUBKEY=<publicKey> TV_CRED_PRIVKEY=<privateKey> \
-  bun run src/credctl.ts verify --credfile=./cred.enc
-
-# ── 5. 用凭据启动，不需要 TradingView
-TV_CRED_PUBKEY=... TV_CRED_PRIVKEY=... TV_CREDFILE=./cred.enc bun run bridge
+bun run credctl keygen
 ```
 
-也可以不加密，直接用环境变量（适合临时调试）：
+```json
+{
+  "publicKey": "<32 字节，base64>",
+  "privateKey": "<PKCS#8，base64>"
+}
+```
+
+- `privateKey` → 留在 B，存成环境变量 `TV_CRED_PRIVKEY`
+- `publicKey` → 拷到 A，用于加密
+
+> 每次 `keygen` 都产生新的一对。换一对，旧的凭据就解不开了，需要重新 capture。
+
+### 2. 在 A 上抓取并加密
+
+A 上的 TradingView 要**已经登录**，并且**带着调试端口在跑**（否则读不到 cookie）：
 
 ```bash
-TV_SESSIONID=<sessionid> bun run bridge
+# A 上也装一份这个项目
+git clone https://github.com/CN059/tv-paper-api && cd tv-paper-api && bun install
+
+# 退出 TV 后带端口重启（Windows）
+powershell -ExecutionPolicy Bypass -File scripts/launch-tv.ps1 -Port 9333
+
+# 抓取并加密
+bun run credctl capture --to=<公钥> --out=./cred.enc
+```
+
+```text
+sealed credential written to ./cred.enc (mode 600)
+session expires: 2027-01-31T12:09:57.411Z
+envelope: tvcred1.eyJ2IjoxLCJlcGsiOi...   # 复制这串也能用
+```
+
+三个产物，用途不同：
+
+| 产物 | 用途 |
+|---|---|
+| `cred.enc` | 密文文件，**这个才需要传到 B** |
+| `session expires` | 到期时间，记下来以便提前重抓 |
+| `envelope: tvcred1.…` | 同一份密文的文本形式，方便直接粘贴 |
+
+`cred.enc` 权限是 `0600`。明文 cookie 从不落盘、不回显。
+
+可以顺带固定账户，省掉每次查询：
+
+```bash
+bun run credctl capture --to=<公钥> --account=<accountId> --out=./cred.enc
+```
+
+### 3. 把密文传到 B
+
+```bash
+scp cred.enc user@server:~/.tv-paper/cred.enc
+chmod 600 ~/.tv-paper/cred.enc     # 服务器上再收紧一次
+```
+
+也可以直接粘贴 `tvcred1.…` 那串文本，用 `--credfile` 指向保存的文件效果相同。
+
+### 4. 在 B 上验证
+
+解封 + 真实调用一次，确认凭据可用（而不只是能解密）：
+
+```bash
+export TV_CRED_PUBKEY=<公钥>
+export TV_CRED_PRIVKEY=<私钥>
+
+bun run credctl verify --credfile=./cred.enc
+```
+
+```json
+{
+  "ok": true,
+  "segment": "pro",
+  "accounts": 1,
+  "hint": "account id available in the account list"
+}
+```
+
+`ok: false` 说明 cookie 过期或被登出 —— 回第 2 步重新 capture。
+
+### 5. 在 B 上启动，此后不再需要 TradingView
+
+```bash
+export TV_CRED_PUBKEY=<公钥>
+export TV_CRED_PRIVKEY=<私钥>
+export TV_CREDFILE=~/.tv-paper/cred.enc
+
+bun run bridge
+```
+
+```text
+tv-paper-api bridge on http://127.0.0.1:8787  (mode headless, token off)
+```
+
+看到 `mode headless` 就对了 —— 这台机器上没有浏览器也没有 TradingView。
+
+### 单机简化路径
+
+A 和 B 是同一台机器时，不必折腾传输：
+
+```bash
+# 直接给 cookie，跳过加密信封（仅适合临时调试）
+export TV_SESSIONID=<sessionid>
+bun run bridge
+```
+
+想从运行中的 TV 里取这个值：
+
+```bash
+bun run credctl capture --to=<公钥> --out=./cred.enc   # 然后解开看 cookie
 ```
 
 ### 环境变量
@@ -131,12 +237,11 @@ TV_SESSIONID=<sessionid> bun run bridge
 
 ## 网关 API
 
-返回结构统一 `{ ok, ... }`，失败带 `status` 和 TV 原始 `detail`。
-参数不合法返回 `400`，上游拒单返回 `502`。
+网关默认 `http://127.0.0.1:8787`，只监听本机。返回统一为 `{ ok, ... }`。
 
 | 方法 | 路径 | body | 说明 |
 |---|---|---|---|
-| GET | `/health` | – | TV 页面是否在线 |
+| GET | `/health` | – | 运行模式与后端状态 |
 | GET | `/accounts` | – | 账户列表（含余额） |
 | GET | `/positions?account=` | – | 持仓 + 挂单 |
 | POST | `/order` | `{symbol, side, qty, type?, price?, sl?, tp?, account?}` | 下单 |
@@ -144,8 +249,230 @@ TV_SESSIONID=<sessionid> bun run bridge
 | POST | `/reverse` | `{symbol, account?}` | 多空翻转 |
 | POST | `/cancel` | `{id, account?}` | 撤单 |
 
-`type` 取 `market`（默认）、`limit`、`stop`；`limit`/`stop` 必须给 `price`。
-`side` 只接受 `buy` / `sell`。
+**状态码**：`200` 成功 · `400` 参数不合法 · `401` 网关 token 错误 ·
+`502` 上游拒单或后端不可用 · `500` 其他。
+
+### GET /health
+
+```bash
+curl -s http://127.0.0.1:8787/health
+```
+
+```json
+// headless 模式
+{ "ok": true, "mode": "headless", "segment": "pro", "account": null }
+
+// attached 模式
+{ "ok": true, "mode": "attached", "tvTarget": "https://www.tradingview.com/chart/", "cdpPort": 9333 }
+```
+
+### GET /accounts
+
+```bash
+curl -s http://127.0.0.1:8787/accounts
+```
+
+```json
+{
+  "ok": true,
+  "segment": "pro",
+  "accounts": [
+    {
+      "accountId": 10000001,
+      "default": true,
+      "balance": 99800.5,
+      "initialBalance": 100000,
+      "hidden": false,
+      "marginCallEnabled": false,
+      "segment": "pro",
+      "commissions": { "stocks": { "type": "disabled" } }
+    }
+  ]
+}
+```
+
+账户对象**原样转发服务端字段**（`commissions`、`marginCallEnabled`、`segment` 等随套餐变化），
+这里只列常用的。`accountId` 是数字；把它传给其他接口时用字符串或数字都可以。
+
+不传 `account` 时，后续下单会自动选 `default: true` 且未隐藏的那个。
+
+### GET /positions
+
+```bash
+curl -s "http://127.0.0.1:8787/positions"
+```
+
+```json
+{
+  "ok": true,
+  "accountId": "paper-1",
+  "balance": 99800.5,
+  "positions": [
+    { "symbol": "NASDAQ:AAPL", "qty": 1, "price": 180.2, "pl": 12.5 }
+  ],
+  "orders": [
+    { "id": 42, "symbol": "NASDAQ:AAPL", "type": "limit", "side": "buy", "qty": 2, "price": 175, "status": "working" }
+  ]
+}
+```
+
+`qty` 带符号：**正数是多头，负数是空头**。持仓与挂单对象同样原样转发，
+所以会出现 `close-date`、`marginRate`、`pointvalue` 这类带连字符的原始字段名。
+
+### POST /order
+
+```bash
+curl -X POST http://127.0.0.1:8787/order \
+  -H "Content-Type: application/json" \
+  -d '{"symbol":"NASDAQ:AAPL","side":"buy","qty":1}'
+```
+
+```json
+{
+  "ok": true,
+  "accountId": "10000001",
+  "request": { "symbol": "NASDAQ:AAPL", "type": "market", "qty": 1, "side": "buy" },
+  "response": { "id": 7, "symbol": "NASDAQ:AAPL", "side": "buy", "type": "market", "status": "pending" }
+}
+```
+
+参数：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `symbol` | 是 | `EXCHANGE:TICKER`，不能含空格。如 `NASDAQ:AAPL`、`FX_IDC:USDJPY`、`BINANCE:BTCUSDT` |
+| `side` | 是 | `buy` 或 `sell` |
+| `qty` | 是 | 正数 |
+| `type` | 否 | `market`（默认）/ `limit` / `stop` |
+| `price` | `limit`/`stop` 必填 | 委托价 |
+| `sl` / `tp` | 否 | 止损 / 止盈价 |
+| `account` | 否 | 指定账户，否则用默认账户 |
+
+```bash
+# 限价单 + 止损止盈
+curl -X POST http://127.0.0.1:8787/order -H "Content-Type: application/json" \
+  -d '{"symbol":"BINANCE:BTCUSDT","side":"sell","qty":0.01,"type":"limit","price":60000,"sl":61000,"tp":58000}'
+```
+
+> **市价单是异步的**。返回的 `status` 通常是 `pending`，1–5 秒后才成交。
+> 量化侧必须轮询 `/positions` 确认，不要假定返回即持仓到位。
+
+### POST /close
+
+```bash
+# 全部平掉
+curl -X POST http://127.0.0.1:8787/close -H "Content-Type: application/json" \
+  -d '{"symbol":"NASDAQ:AAPL"}'
+
+# 平掉指定数量
+curl -X POST http://127.0.0.1:8787/close -H "Content-Type: application/json" \
+  -d '{"symbol":"NASDAQ:AAPL","qty":1}'
+```
+
+### POST /reverse
+
+```bash
+curl -X POST http://127.0.0.1:8787/reverse -H "Content-Type: application/json" \
+  -d '{"symbol":"NASDAQ:AAPL"}'
+```
+
+一次调用把多头翻成等量空头，反之亦然。
+
+### POST /cancel
+
+```bash
+curl -X POST http://127.0.0.1:8787/cancel -H "Content-Type: application/json" \
+  -d '{"id":42}'
+```
+
+### 错误示例
+
+```json
+// 400 参数问题（调用方的错）
+{ "ok": false, "error": "qty must be a positive number" }
+{ "ok": false, "error": "side must be 'buy' or 'sell'" }
+{ "ok": false, "error": "price is required for limit orders" }
+
+// 502 上游拒单（服务端的事）
+{ "ok": false, "status": 400, "error": "paper request failed: trading/place/10000001 (HTTP 400)",
+  "detail": { "err_code": "unspecified_bad_request", "error": "malformed request syntax" } }
+```
+
+## 从量化程序调用
+
+网关就是个普通 HTTP 服务，任何语言都能用。
+
+```python
+# Python
+import requests
+
+BASE = "http://127.0.0.1:8787"
+
+def buy(symbol, qty):
+    r = requests.post(f"{BASE}/order", json={"symbol": symbol, "side": "buy", "qty": qty}, timeout=15)
+    data = r.json()
+    if not data["ok"]:
+        raise RuntimeError(data)
+    return data["response"]
+
+def position(symbol):
+    """Signed position size; 0 when flat. Positive = long."""
+    snap = requests.get(f"{BASE}/positions", timeout=15).json()
+    for p in snap.get("positions", []):
+        if p["symbol"] == symbol:
+            return p["qty"]
+    return 0
+```
+
+```typescript
+// Bun / Node
+const BASE = 'http://127.0.0.1:8787';
+
+const place = async (order: { symbol: string; side: 'buy' | 'sell'; qty: number }) => {
+  const res = await fetch(`${BASE}/order`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(order),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error);
+  return data.response;
+};
+```
+
+完整示例见 `examples/client.py`。
+
+### 目标仓位模式
+
+纸交易是净持仓语义，最省事的接法是把「目标仓位」换算成 delta：
+
+```python
+def rebalance(symbol, target):
+    current = position(symbol)
+    delta = target - current
+    if delta == 0:
+        return None
+    side = "buy" if delta > 0 else "sell"
+    return buy(symbol, abs(delta)) if side == "buy" else sell(symbol, abs(delta))
+```
+
+想直接反手（多 → 等量空）就用 `/reverse`，一次调用完成。
+
+### 轮询成交
+
+市价单返回 `status: "pending"`，必须自己确认：
+
+```python
+import time
+
+def wait_filled(symbol, qty, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if position(symbol) == qty:
+            return True
+        time.sleep(0.5)
+    return False
+```
 
 ## 命令行
 
@@ -161,6 +488,20 @@ bun run tvctl cancel --id=<orderId>
 ```
 
 端口不是 9333 时用 `--port=<n>` 或 `TVCDP_PORT`。
+
+stdout 是纯 JSON（`bun run` 的横幅走 stderr），可以直接管道给 `jq`：
+
+```bash
+# 取默认账户余额
+bun run tvctl positions 2>/dev/null | jq -r .balance
+
+# 平掉所有多头持仓
+bun run tvctl positions 2>/dev/null \
+  | jq -r '.positions[] | select(.qty > 0) | "\(.symbol) \(.qty)"' \
+  | while read -r sym qty; do bun run tvctl place --symbol="$sym" --side=sell --qty="$qty" 2>/dev/null; done
+```
+
+退出码：`0` 成功 · `1` 请求被拒 · `2` 用法错误。
 
 ## 做多 / 做空
 

@@ -10,6 +10,7 @@
   "scripts": {
     "bridge": "bun run src/bridge.ts",
     "tvctl": "bun run src/tvctl.ts",
+    "credctl": "bun run src/credctl.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
