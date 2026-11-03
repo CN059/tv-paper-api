@@ -7,7 +7,14 @@ license = "MIT"
 repository = "https://github.com/CN059/tv-paper-api"
 
 [dependencies]
-eframe = { version = "0.32", default-features = false, features = ["glow", "default_fonts"] }
+# x11/wayland are explicit: with default-features off, winit cannot build on
+# Linux without them, and they are inert on Windows and macOS.
+eframe = { version = "0.32", default-features = false, features = [
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
 egui = "0.32"
 ureq = { version = "2.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

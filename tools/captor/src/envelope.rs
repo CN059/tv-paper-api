@@ -81,7 +81,7 @@ pub fn seal(credential: &Credential, consumer_public_spki_b64: &str) -> Result<S
     let plaintext = serde_json::to_vec(credential).map_err(|e| format!("encode failed: {e}"))?;
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce_checked(&nonce)?),
             Payload {
                 msg: &plaintext,
                 aad: b"",
@@ -105,6 +105,13 @@ pub fn seal(credential: &Credential, consumer_public_spki_b64: &str) -> Result<S
 
     let json = serde_json::to_vec(&envelope).map_err(|e| format!("encode failed: {e}"))?;
     Ok(format!("tvcred1.{}", base64_url(&json)))
+}
+
+/// AES-GCM needs exactly a 12-byte nonce; reject anything else rather than panic.
+fn nonce_checked(bytes: &[u8]) -> Result<[u8; IV_BYTES], String> {
+    bytes
+        .try_into()
+        .map_err(|_| format!("nonce must be {} bytes, got {}", IV_BYTES, bytes.len()))
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -161,7 +168,7 @@ pub fn open(envelope: &Envelope, consumer_public_b64: &str, consumer_private_b64
     let ct = B64.decode(&envelope.ct).map_err(|e| format!("invalid ciphertext: {e}"))?;
 
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad: b"" })
+        .decrypt(&Nonce::from(nonce_checked(&nonce)?), Payload { msg: &ct, aad: b"" })
         .map_err(|_| "decryption failed (wrong key or corrupted envelope)".to_string())?;
 
     serde_json::from_slice(&plaintext).map_err(|e| format!("payload is not a credential: {e}"))

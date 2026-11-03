@@ -15,7 +15,8 @@
     "build:web": "cd web && bun install --frozen-lockfile && bun run build",
     "dev:web": "cd web && bun run dev",
     "test": "bun test",
-    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit",
+    "typecheck:web": "cd web && tsc -b --noEmit"
   },
   "engines": {
     "bun": ">=1.3.0"
