@@ -32,8 +32,9 @@ ENV NODE_ENV=production \
 
 EXPOSE 8787
 
-# The health endpoint reports whether the backing driver is reachable.
+# The health endpoint is behind BRIDGE_TOKEN, so the probe must present it.
+# CMD-SHELL form, not exec: the token has to be expanded at runtime.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- "http://127.0.0.1:${PORT}/api/health" >/dev/null 2>&1 || exit 1
+  CMD-SHELL wget -q -T 3 -O /dev/null --header="Authorization: Bearer ${BRIDGE_TOKEN}" "http://127.0.0.1:${PORT}/api/health" || exit 1
 
 CMD ["bun", "src/server.ts"]
