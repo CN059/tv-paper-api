@@ -3,7 +3,7 @@
     pip install requests
     python examples/client.py
 
-Start the bridge first:  npm run bridge
+Start the bridge first:  bun run bridge
 """
 
 import os
