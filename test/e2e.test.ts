@@ -13,11 +13,11 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { evaluate, findChartTarget } from '../src/cdp.ts';
-import { runCommand } from '../src/driver.ts';
+import { runCommand, type DriverOptions } from '../src/driver.ts';
 import { CHART_URL_MATCH } from '../src/page-shim.ts';
 
 const CDP_PORT = Number(process.env.TVCDP_PORT ?? 9333);
-const driver = { port: CDP_PORT };
+const driver: DriverOptions = { mode: 'attached', port: CDP_PORT };
 const available = (await findChartTarget(CDP_PORT)) !== null;
 
 interface RecordedCall {

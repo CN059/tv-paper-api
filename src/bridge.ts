@@ -1,22 +1,65 @@
 #!/usr/bin/env bun
 /**
- * Local HTTP gateway: quant app -> TradingView Desktop paper trading.
+ * Local HTTP gateway: quant app -> TradingView paper trading.
  *
- *   bun run src/bridge.ts                 # :8787
- *   BRIDGE_TOKEN=secret bun run src/bridge.ts
- *   BRIDGE_PORT=9000 TVCDP_PORT=9334 bun run src/bridge.ts
+ *   bun run src/bridge.ts                      # attached: drives the desktop app over CDP
+ *   TV_SESSIONID=... bun run src/bridge.ts     # headless: no browser needed
+ *   bun run src/bridge.ts --credfile ./cred.enc  # headless: unseal a captured credential
  *
- * Binds 127.0.0.1 only. Every request runs inside the TradingView renderer, so the
- * session cookie and User-Agent are the desktop client's own.
+ * In headless mode no desktop app, browser or display is required - only the
+ * captured session cookie. Attached mode handles no credential at all.
+ *
+ * Binds 127.0.0.1 by default; set BRIDGE_HOST=0.0.0.0 only behind a token.
  */
 import { findChartTarget } from './cdp.ts';
-import { accounts, accountSnapshot, cancelOrder, closePosition, placeOrder, reversePosition } from './driver.ts';
+import { decodeEnvelope, open, type Credential } from './credential.ts';
+import {
+  accountSnapshot,
+  accounts,
+  cancelOrder,
+  closePosition,
+  placeOrder,
+  reversePosition,
+  type DriverOptions,
+} from './driver.ts';
 import type { OrderInput, Segment } from './types.ts';
 
 const PORT = Number(process.env.BRIDGE_PORT ?? 8787);
+const HOST = process.env.BRIDGE_HOST ?? '127.0.0.1';
 const CDP_PORT = Number(process.env.TVCDP_PORT ?? 9333);
 const TOKEN = process.env.BRIDGE_TOKEN ?? '';
-const driver = { port: CDP_PORT, timeoutMs: Number(process.env.BRIDGE_TIMEOUT_MS ?? 15_000) };
+const TIMEOUT_MS = Number(process.env.BRIDGE_TIMEOUT_MS ?? 15_000);
+
+/** How the credential reached us: inline env var or a sealed file. */
+async function resolveCredential(): Promise<Credential | null> {
+  const inline = process.env.TV_SESSIONID;
+  if (inline) {
+    return {
+      cookie: inline.includes('=') ? inline : `sessionid=${inline}`,
+      segment: process.env.TV_SEGMENT === 'free' ? 'free' : 'pro',
+      account: process.env.TV_ACCOUNT,
+    };
+  }
+
+  const file = process.env.TV_CREDFILE ?? flagValue('credfile');
+  if (!file) return null;
+
+  const keys = { publicKey: process.env.TV_CRED_PUBKEY ?? '', privateKey: process.env.TV_CRED_PRIVKEY ?? '' };
+  if (!keys.publicKey || !keys.privateKey) {
+    throw new Error('TV_CRED_PUBKEY and TV_CRED_PRIVKEY are required to unseal a credential file');
+  }
+  return open(decodeEnvelope(await Bun.file(file).text()), keys);
+}
+
+function flagValue(name: string): string | undefined {
+  const [, value] = new RegExp(`^--${name}=(.+)$`).exec(process.argv.slice(2).join(' ')) ?? [];
+  return value;
+}
+
+const credential = await resolveCredential();
+const driver: DriverOptions = credential
+  ? { mode: 'headless', credential }
+  : { mode: 'attached', port: CDP_PORT, timeoutMs: TIMEOUT_MS };
 
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body, null, 1), {
@@ -24,7 +67,7 @@ const json = (status: number, body: unknown): Response =>
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
 
-/** `ok: false` from a command means the order was rejected upstream, not that we crashed. */
+/** `ok: false` from a command means upstream rejected it, not that we crashed. */
 const relay = (result: { ok: boolean }) => json(result.ok ? 200 : 502, result);
 
 async function readJson(request: Request): Promise<Record<string, unknown>> {
@@ -37,8 +80,8 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
   return parsed as Record<string, unknown>;
 }
 
-// HTTP bodies are untyped input: coerce numbers/strings loosely, let the driver
-// reject implausible values with a precise message.
+// HTTP bodies are untyped input: coerce loosely, then let the driver reject
+// implausible values with a precise message.
 const text = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
 const numeric = (value: unknown): number | undefined => {
   if (value === undefined || value === null) return undefined;
@@ -49,7 +92,7 @@ const segmentOf = (value: string | null): Segment | undefined =>
   value === 'pro' || value === 'free' ? value : undefined;
 
 const server = Bun.serve({
-  hostname: '127.0.0.1',
+  hostname: HOST,
   port: PORT,
   idleTimeout: 60,
   async fetch(request) {
@@ -61,8 +104,16 @@ const server = Bun.serve({
 
     try {
       if (request.method === 'GET' && url.pathname === '/health') {
-        const target = await findChartTarget(CDP_PORT);
-        return json(200, { ok: target !== null, tvTarget: target?.url ?? null, cdpPort: CDP_PORT });
+        if (driver.mode === 'headless') {
+          return json(200, {
+            ok: true,
+            mode: 'headless',
+            segment: driver.credential.segment ?? 'pro',
+            account: driver.credential.account ?? null,
+          });
+        }
+        const target = await findChartTarget(driver.port);
+        return json(200, { ok: target !== null, mode: 'attached', tvTarget: target?.url ?? null, cdpPort: driver.port });
       }
 
       if (request.method === 'GET' && url.pathname === '/accounts') {
@@ -117,5 +168,7 @@ const server = Bun.serve({
 });
 
 console.log(
-  `tv-paper-api bridge on http://127.0.0.1:${server.port}  (CDP 127.0.0.1:${CDP_PORT}, token ${TOKEN ? 'required' : 'off'})`,
+  `tv-paper-api bridge on http://${HOST}:${server.port}  ` +
+    `(mode ${driver.mode}${driver.mode === 'attached' ? `, CDP ${driver.port}` : ''}, ` +
+    `token ${TOKEN ? 'required' : 'off'})`,
 );

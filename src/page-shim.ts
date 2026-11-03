@@ -1,54 +1,83 @@
 /**
- * The page-side request layer.
+ * The paper-trading wire protocol, as one self-contained function.
  *
- * This function is serialised with `Function.prototype.toString()` and evaluated
- * inside the TradingView renderer, so it MUST be self-contained: no imports at
- * runtime, no references to module scope. Type annotations are erased by Bun
- * before stringification, so they cost nothing when injected.
+ * Two ways in, one implementation:
  *
- * It reproduces the request the desktop client makes itself (bundle module 202391,
- * `paperFetch`):
+ * 1. **Attached to a live desktop app** - stringified with
+ *    `Function.prototype.toString()` and evaluated inside the TradingView
+ *    renderer, where the `sessionid` cookie is already present.
+ * 2. **Headless** - imported and called directly from Bun with a captured
+ *    cookie, so no browser needs to be running at all.
  *
- *   URL  = new URL(`${TRADING_URLS[segment]}/${path}`, location.origin)
- *   init = { method, credentials: 'include',
- *            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
- *            body: JSON.stringify(body) }
+ * That is why the body must stay self-contained: no runtime imports, no
+ * module-scope references. Bun erases the types before stringification, so the
+ * annotations below cost nothing in the injected form.
  *
- * The `sessionid` cookie is the only credential. Do not add an auth header: the
- * endpoint's CORS preflight only allows `X-UseNewAuth`, so any extra custom header
- * fails before the request is sent.
- *
- * Responses are relayed, not re-modelled: the account list and snapshots go back
- * exactly as the server sent them, because that is the endpoint's real contract.
+ * Endpoint map, order body and error codes were reverse-engineered from the
+ * desktop bundle (module 202391, `paperFetch`).
  */
 import type { PageRequest, PageResponse } from './types.ts';
 
-export async function pageShim(args: PageRequest): Promise<PageResponse> {
-  const host = window as unknown as {
+/** Public paper-trading hosts, from `window.initData.settings.TRADING_URLS`. */
+export const PAPER_HOSTS = {
+  pro: 'https://papertrading.tradingview.com',
+  free: 'https://papertrading-free.tradingview.com',
+} as const;
+
+/**
+ * The desktop client's User-Agent. A captured session was issued to this client,
+ * so headless calls present the same identity.
+ */
+export const DESKTOP_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'TradingView/3.5.0 Chrome/146.0.0.0 Safari/537.36 TVDesktop/3.5.0';
+
+/** Where to send the call; omitted means "use the page's own origin and cookies". */
+export interface Shunt {
+  base: string;
+  cookie: string;
+  userAgent: string;
+}
+
+export async function paperShim(
+  args: PageRequest,
+  shunt?: Shunt,
+): Promise<PageResponse> {
+  const host = typeof window === 'undefined' ? undefined : (window as unknown as {
     initData?: { settings?: { TRADING_URLS?: Record<string, string> } };
-  };
+  });
 
-  const urls = host.initData?.settings?.TRADING_URLS;
-  if (!urls) return { ok: false, error: 'TRADING_URLS missing (page not ready?)' };
-
-  const segment = args.segment ?? 'pro';
-  const base = urls[segment] ?? urls.pro;
-  if (!base) return { ok: false, error: `unknown segment: ${segment}` };
+  const base = shunt?.base ?? host?.initData?.settings?.TRADING_URLS?.[args.segment ?? 'pro'];
+  if (!base) return { ok: false, error: 'TRADING_URLS missing (page not ready?)' };
 
   const call = async (path: string, body?: unknown, method?: string): Promise<unknown> => {
-    const res = await fetch(new URL(`${base}/${path}`, location.origin), {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    };
+    if (shunt) {
+      // Headless: the browser is not there to add these, and the edge 403s without them.
+      headers.Origin = 'https://www.tradingview.com';
+      headers.Referer = 'https://www.tradingview.com/chart/';
+      headers['X-Requested-With'] = 'XMLHttpRequest';
+      headers['User-Agent'] = shunt.userAgent;
+      if (shunt.cookie) headers.Cookie = shunt.cookie;
+    }
+
+    const res = await fetch(`${base}/${path}`, {
       method: method ?? 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      headers,
+      ...(shunt ? {} : { credentials: 'include' as RequestCredentials }),
       body: JSON.stringify(body ?? {}),
     });
+
     const text = await res.text();
     let payload: unknown = text;
     try {
       payload = text ? JSON.parse(text) : null;
     } catch {
-      // Non-JSON error pages stay as raw text; the caller surfaces them verbatim.
+      // Non-JSON error pages stay raw and are surfaced verbatim.
     }
+
     if (!res.ok) {
       throw Object.assign(new Error(`paper request failed: ${path} (HTTP ${res.status})`), {
         status: res.status,
@@ -58,7 +87,6 @@ export async function pageShim(args: PageRequest): Promise<PageResponse> {
     return payload;
   };
 
-  /** Server sends an array; some builds wrap it in `{ accounts: [...] }`. */
   const accountsOf = (res: unknown): unknown[] => {
     if (Array.isArray(res)) return res;
     if (res !== null && typeof res === 'object' && 'accounts' in res && Array.isArray(res.accounts)) {
@@ -73,7 +101,9 @@ export async function pageShim(args: PageRequest): Promise<PageResponse> {
     const usable = list.filter(
       (a) => a !== null && typeof a === 'object' && !('hidden' in a && a.hidden === true),
     );
-    const preferred = usable.find((a) => a !== null && typeof a === 'object' && 'default' in a && a.default === true);
+    const preferred = usable.find(
+      (a) => a !== null && typeof a === 'object' && 'default' in a && a.default === true,
+    );
     const chosen = preferred ?? usable[0];
     if (chosen === undefined || chosen === null || typeof chosen !== 'object' || !('accountId' in chosen)) {
       throw new Error('no paper account on this login');
@@ -84,7 +114,7 @@ export async function pageShim(args: PageRequest): Promise<PageResponse> {
   try {
     switch (args.cmd) {
       case 'accounts':
-        return { ok: true, segment, accounts: accountsOf(await call('trading/accounts')) };
+        return { ok: true, segment: args.segment ?? 'pro', accounts: accountsOf(await call('trading/accounts')) };
 
       case 'account': {
         const id = await pickAccount();

@@ -3,12 +3,12 @@
  * These must pass with no TradingView running.
  */
 import { describe, expect, test } from 'bun:test';
-import { pageShim } from '../src/page-shim.ts';
-import { placeOrder } from '../src/driver.ts';
+import { paperShim } from '../src/page-shim.ts';
+import { placeOrder, type DriverOptions } from '../src/driver.ts';
 
 describe('page shim serialisation', () => {
   test('stringifies to a self-contained function', () => {
-    const source = pageShim.toString();
+    const source = paperShim.toString();
 
     // Bun strips the TypeScript before stringifying, so what we inject is plain JS.
     expect(source).not.toContain(': Promise<');
@@ -20,13 +20,13 @@ describe('page shim serialisation', () => {
   });
 
   test('is a function once evaluated', () => {
-    const rebuilt = new Function(`return (${pageShim.toString()})`)();
+    const rebuilt = new Function(`return (${paperShim.toString()})`)();
     expect(typeof rebuilt).toBe('function');
   });
 });
 
 describe('order validation', () => {
-  const driver = { port: 9333 };
+  const driver: DriverOptions = { mode: 'attached', port: 9333 };
 
   test('rejects a missing symbol before touching the page', async () => {
     await expect(placeOrder(driver, { symbol: '', side: 'buy', qty: 1 })).rejects.toThrow(

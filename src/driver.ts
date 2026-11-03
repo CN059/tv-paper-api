@@ -1,28 +1,39 @@
 /**
- * Ties the page shim to the CDP transport and validates every command before it
- * reaches the renderer, so a bad request fails here with a clear message instead
- * of as an opaque 400 from TradingView.
+ * Command orchestration: validation, then dispatch to whichever transport the
+ * deployment uses.
+ *
+ * Two transports, same commands:
+ *   - **attached** - evaluate the shim inside a running desktop app over CDP,
+ *     so the app's own session is used and no credential is ever handled;
+ *   - **headless**  - call the service directly with a captured cookie, which
+ *     needs no browser, no desktop app and no GUI (servers, containers, CI).
  */
 import { evaluate } from './cdp.ts';
-import { pageShim } from './page-shim.ts';
-import type { OrderInput, PageRequest, PageResponse } from './types.ts';
+import { paperShim } from './page-shim.ts';
+import type { Credential } from './credential.ts';
+import { DESKTOP_USER_AGENT, PAPER_HOSTS } from './page-shim.ts';
+import type { OrderInput, PageRequest, PageResponse, Segment } from './types.ts';
 
-export interface DriverOptions {
+export interface AttachedOptions {
+  mode: 'attached';
   /** CDP port the desktop client was started with. */
   port: number;
   timeoutMs?: number;
 }
 
-const PAGE_CALL = pageShim.toString();
+export interface HeadlessOptions {
+  mode: 'headless';
+  credential: Credential;
+}
+
+export type DriverOptions = AttachedOptions | HeadlessOptions;
+
+const SHIM_SOURCE = paperShim.toString();
 
 /** Symbol as the desktop client sends it: `EXCHANGE:TICKER`. */
 function validateSymbol(symbol: unknown): string {
-  if (typeof symbol !== 'string' || symbol.trim() === '') {
-    throw new Error('symbol is required');
-  }
-  if (symbol.includes(' ')) {
-    throw new Error(`symbol must not contain spaces: ${symbol}`);
-  }
+  if (typeof symbol !== 'string' || symbol.trim() === '') throw new Error('symbol is required');
+  if (symbol.includes(' ')) throw new Error(`symbol must not contain spaces: ${symbol}`);
   return symbol.trim();
 }
 
@@ -43,17 +54,28 @@ function validateSide(side: unknown): 'buy' | 'sell' {
   return side;
 }
 
-/** Runs one command inside the renderer. Never throws for a rejected order. */
+/** Run one command. Rejections come back as `ok: false`, not as thrown errors. */
 export async function runCommand(
   options: DriverOptions,
   request: PageRequest,
+  segment?: Segment,
 ): Promise<PageResponse> {
-  const expression = `(${PAGE_CALL})(${JSON.stringify(request)})`;
-  return evaluate<PageResponse>(options, expression);
+  if (options.mode === 'headless') {
+    const chosen = segment ?? options.credential.segment ?? 'pro';
+    return paperShim({ ...request, segment: chosen }, {
+      base: PAPER_HOSTS[chosen],
+      cookie: options.credential.cookie,
+      userAgent: DESKTOP_USER_AGENT,
+    });
+  }
+
+  // Attached: the renderer resolves its own host and credentials, so no shunt is passed.
+  const expression = `(${SHIM_SOURCE})(${JSON.stringify({ ...request, segment })})`;
+  return evaluate<PageResponse>({ port: options.port, timeoutMs: options.timeoutMs }, expression);
 }
 
-export async function accounts(options: DriverOptions, segment?: 'pro' | 'free') {
-  return runCommand(options, { cmd: 'accounts', segment });
+export async function accounts(options: DriverOptions, segment?: Segment) {
+  return runCommand(options, { cmd: 'accounts' }, segment);
 }
 
 export async function accountSnapshot(options: DriverOptions, account?: string) {
@@ -65,6 +87,7 @@ export async function placeOrder(options: DriverOptions, input: OrderInput) {
   if (type !== 'market' && input.price === undefined) {
     throw new Error(`price is required for ${type} orders`);
   }
+
   const request: PageRequest = {
     cmd: 'place',
     symbol: validateSymbol(input.symbol),
@@ -77,7 +100,9 @@ export async function placeOrder(options: DriverOptions, input: OrderInput) {
   if (input.tp !== undefined) request.tp = validatePrice(input.tp, 'tp');
   if (input.expiration !== undefined) request.expiration = Number(input.expiration);
   if (input.outsideRth === true) request.outsideRth = true;
-  if (input.account !== undefined) request.account = String(input.account);
+  const account = accountId(input.account ?? defaultAccount(options));
+  if (account !== undefined) request.account = account;
+
   return runCommand(options, request);
 }
 
@@ -87,7 +112,8 @@ export async function closePosition(
 ) {
   const request: PageRequest = { cmd: 'close', symbol: validateSymbol(input.symbol) };
   if (input.qty !== undefined) request.qty = validateQty(input.qty);
-  if (input.account !== undefined) request.account = String(input.account);
+  const account = accountId(input.account ?? defaultAccount(options));
+  if (account !== undefined) request.account = account;
   return runCommand(options, request);
 }
 
@@ -96,7 +122,8 @@ export async function reversePosition(
   input: { symbol: string; account?: string | number },
 ) {
   const request: PageRequest = { cmd: 'reverse', symbol: validateSymbol(input.symbol) };
-  if (input.account !== undefined) request.account = String(input.account);
+  const account = accountId(input.account ?? defaultAccount(options));
+  if (account !== undefined) request.account = account;
   return runCommand(options, request);
 }
 
@@ -107,6 +134,24 @@ export async function cancelOrder(
   const id = Number(input.id);
   if (!Number.isFinite(id)) throw new Error('id must be a number');
   const request: PageRequest = { cmd: 'cancel', id };
-  if (input.account !== undefined) request.account = String(input.account);
+  const account = accountId(input.account ?? defaultAccount(options));
+  if (account !== undefined) request.account = account;
   return runCommand(options, request);
+}
+
+/** A captured credential can pin the account, avoiding a lookup on every order. */
+function defaultAccount(options: DriverOptions): string | undefined {
+  return options.mode === 'headless' ? options.credential.account : undefined;
+}
+
+/**
+ * Coerce an account id to its wire form.
+ *
+ * `String(undefined)` would produce the literal "undefined" and turn into
+ * `trading/place/undefined` on the wire, so absence is preserved explicitly and
+ * the shim falls back to resolving the default account itself.
+ */
+function accountId(value: string | number | undefined): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return String(value);
 }

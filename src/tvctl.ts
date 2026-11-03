@@ -3,16 +3,19 @@
  * Command line for the paper-trading endpoints.
  *
  *   bun run src/tvctl.ts accounts
- *   bun run src/tvctl.ts account    [--account=<id>]
- *   bun run src/tvctl.ts positions  [--account=<id>]
- *   bun run src/tvctl.ts place      --symbol=NASDAQ:AAPL --side=buy --qty=1 [--type=market|limit|stop] [--price=] [--sl=] [--tp=] [--outsideRth=true]
- *   bun run src/tvctl.ts close      --symbol=NASDAQ:AAPL [--qty=1]
- *   bun run src/tvctl.ts reverse    --symbol=NASDAQ:AAPL
- *   bun run src/tvctl.ts cancel     --id=<orderId>
+ *   bun run src/tvctl.ts positions [--account=<id>]
+ *   bun run src/tvctl.ts place --symbol=NASDAQ:AAPL --side=buy --qty=1 [--type=limit --price=100]
+ *   bun run src/tvctl.ts close   --symbol=NASDAQ:AAPL [--qty=1]
+ *   bun run src/tvctl.ts reverse --symbol=NASDAQ:AAPL
+ *   bun run src/tvctl.ts cancel  --id=<orderId>
  *
- * --port=<n> or TVCDP_PORT overrides the debug port. Exit code 1 when the
- * endpoint rejects the request, 2 when the invocation is wrong.
+ * Transport is picked from the environment:
+ *   attached (default)  drives a running desktop app over CDP; --port / TVCDP_PORT
+ *   headless            uses a captured session; TV_SESSIONID or --credfile=...
+ *
+ * Exit code 1 when the endpoint rejects the request, 2 when the invocation is wrong.
  */
+import { decodeEnvelope, open } from './credential.ts';
 import {
   accountSnapshot,
   accounts,
@@ -21,6 +24,7 @@ import {
   placeOrder,
   reversePosition,
   runCommand,
+  type DriverOptions,
 } from './driver.ts';
 import type { OrderType, Side } from './types.ts';
 
@@ -41,14 +45,41 @@ const numberFlag = (key: string): number | undefined => {
   return n;
 };
 
-const driver = { port: Number(flags.get('port') ?? process.env.TVCDP_PORT ?? 9333) };
-const account = flags.get('account');
+async function resolveDriver(): Promise<DriverOptions> {
+  const inline = flags.get('sessionid') ?? process.env.TV_SESSIONID;
+  if (inline) {
+    return {
+      mode: 'headless',
+      credential: {
+        cookie: inline.includes('=') ? inline : `sessionid=${inline}`,
+        segment: process.env.TV_SEGMENT === 'free' ? 'free' : 'pro',
+        account: flags.get('account') ?? process.env.TV_ACCOUNT,
+      },
+    };
+  }
+
+  const credfile = flags.get('credfile') ?? process.env.TV_CREDFILE;
+  if (credfile) {
+    const publicKey = process.env.TV_CRED_PUBKEY ?? '';
+    const privateKey = process.env.TV_CRED_PRIVKEY ?? '';
+    if (!publicKey || !privateKey) {
+      throw new Error('TV_CRED_PUBKEY and TV_CRED_PRIVKEY are required to unseal a credential file');
+    }
+    const credential = await open(decodeEnvelope(await Bun.file(credfile).text()), { publicKey, privateKey });
+    return { mode: 'headless', credential };
+  }
+
+  return { mode: 'attached', port: Number(flags.get('port') ?? process.env.TVCDP_PORT ?? 9333) };
+}
 
 /** Print the result and mirror a rejected request into the exit code. */
 const report = (result: { ok: boolean }) => {
   console.log(JSON.stringify(result, null, 2));
   if (!result.ok) process.exitCode = 1;
 };
+
+const driver = await resolveDriver();
+const account = flags.get('account');
 
 switch (command) {
   case 'accounts':
